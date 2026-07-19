@@ -1,4 +1,4 @@
-# Gnetwork - High Performance Network Manager
+# Gnetwork - Lightweight Network Manager
 
 Gnetwork is a lightweight, high-speed C-based network management suite designed for Linux. It supports automatic carrier detection, Ethernet auto-configuration, Wi-Fi scanning and connections, DNS configuration, and static IP management.
 
