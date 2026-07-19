@@ -41,6 +41,7 @@ static void update_resolv_conf(const char *dns1, const char *dns2) {
 #include <sys/ioctl.h>
 #include <netpacket/packet.h>
 #include <net/ethernet.h>
+#include <net/if_arp.h>
 #include <netinet/ip.h>
 #include <netinet/udp.h>
 
