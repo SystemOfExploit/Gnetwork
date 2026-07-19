@@ -39,10 +39,10 @@ static void update_resolv_conf(const char *dns1, const char *dns2) {
 }
 
 static void auto_dhcp(const char *ifname) {
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "ip link set %s up 2>/dev/null", ifname);
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "ip link set %.32s up 2>/dev/null", ifname);
     system(cmd);
-    snprintf(cmd, sizeof(cmd), "dhcpcd %s 2>/dev/null || udhcpc -i %s -n 2>/dev/null || dhclient %s 2>/dev/null", ifname, ifname, ifname);
+    snprintf(cmd, sizeof(cmd), "dhcpcd %.32s 2>/dev/null || udhcpc -i %.32s -n 2>/dev/null || dhclient %.32s 2>/dev/null", ifname, ifname, ifname);
     system(cmd);
 }
 
@@ -251,7 +251,10 @@ int main() {
         return 1;
     }
 
-    auto_detect_and_bringup();
+    pthread_t th;
+    if (pthread_create(&th, NULL, (void *(*)(void *))auto_detect_and_bringup, NULL) == 0) {
+        pthread_detach(th);
+    }
 
     while (running) {
         int client_fd = accept(server_fd, NULL, NULL);

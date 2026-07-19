@@ -120,7 +120,10 @@ elif [ -d /etc/sv/gnetwork ]; then
 elif command -v 66-enable >/dev/null 2>&1; then
     66-enable gnetwork 2>/dev/null || true
     66-start gnetwork 2>/dev/null || true
-else
+    /usr/local/bin/gnetworkd &
+fi
+
+if ! pgrep -x gnetworkd >/dev/null 2>&1; then
     /usr/local/bin/gnetworkd &
 fi
 
