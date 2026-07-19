@@ -39,6 +39,10 @@ static void update_resolv_conf(const char *dns1, const char *dns2) {
 }
 
 #include <sys/ioctl.h>
+#include <netpacket/packet.h>
+#include <net/ethernet.h>
+#include <netinet/ip.h>
+#include <netinet/udp.h>
 
 struct dhcp_msg {
     uint8_t op;
@@ -59,123 +63,186 @@ struct dhcp_msg {
     uint8_t options[308];
 } __attribute__((packed));
 
+static uint16_t dhcp_checksum(uint16_t *buf, int nwords) {
+    uint32_t sum = 0;
+    for (; nwords > 0; nwords--)
+        sum += *buf++;
+    sum = (sum >> 16) + (sum & 0xffff);
+    sum += (sum >> 16);
+    return (uint16_t)(~sum);
+}
+
 static int builtin_dhcp(const char *ifname) {
-    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    int ifindex = if_nametoindex(ifname);
+    if (ifindex == 0) return -1;
+
+    int sock = socket(AF_PACKET, SOCK_DGRAM, htons(ETH_P_IP));
     if (sock < 0) return -1;
 
-    int opt = 1;
-    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
-    setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE, ifname, strlen(ifname));
-
     struct timeval tv;
-    tv.tv_sec = 2;
+    tv.tv_sec = 3;
     tv.tv_usec = 0;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
+    int ctl_sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (ctl_sock < 0) { close(sock); return -1; }
     struct ifreq ifr;
     memset(&ifr, 0, sizeof(ifr));
     strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
-    if (ioctl(sock, SIOCGIFHWADDR, &ifr) < 0) {
+    if (ioctl(ctl_sock, SIOCGIFHWADDR, &ifr) < 0) {
+        close(ctl_sock);
         close(sock);
         return -1;
     }
+    close(ctl_sock);
 
-    struct sockaddr_in bind_addr;
-    memset(&bind_addr, 0, sizeof(bind_addr));
-    bind_addr.sin_family = AF_INET;
-    bind_addr.sin_port = htons(68);
-    bind_addr.sin_addr.s_addr = INADDR_ANY;
-
-    if (bind(sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
-        close(sock);
-        return -1;
-    }
+    struct sockaddr_ll sll;
+    memset(&sll, 0, sizeof(sll));
+    sll.sll_family = AF_PACKET;
+    sll.sll_protocol = htons(ETH_P_IP);
+    sll.sll_ifindex = ifindex;
+    sll.sll_hatype = ARPHRD_ETHER;
+    sll.sll_pkttype = PACKET_BROADCAST;
+    sll.sll_halen = 6;
+    memset(sll.sll_addr, 0xff, 6);
 
     uint32_t xid = (uint32_t)rand();
 
-    struct dhcp_msg packet;
-    memset(&packet, 0, sizeof(packet));
-    packet.op = 1;
-    packet.htype = 1;
-    packet.hlen = 6;
-    packet.xid = xid;
-    packet.flags = htons(0x8000);
-    memcpy(packet.chaddr, ifr.ifr_hwaddr.sa_data, 6);
-    packet.cookie = htonl(0x63825363);
+    uint8_t buffer[600];
+    memset(buffer, 0, sizeof(buffer));
+
+    struct iphdr *iph = (struct iphdr *)buffer;
+    struct udphdr *udph = (struct udphdr *)(buffer + sizeof(struct iphdr));
+    struct dhcp_msg *dhcp = (struct dhcp_msg *)(buffer + sizeof(struct iphdr) + sizeof(struct udphdr));
+
+    dhcp->op = 1;
+    dhcp->htype = 1;
+    dhcp->hlen = 6;
+    dhcp->xid = xid;
+    dhcp->flags = htons(0x8000);
+    memcpy(dhcp->chaddr, ifr.ifr_hwaddr.sa_data, 6);
+    dhcp->cookie = htonl(0x63825363);
 
     int opt_idx = 0;
-    packet.options[opt_idx++] = 53;
-    packet.options[opt_idx++] = 1;
-    packet.options[opt_idx++] = 1;
+    dhcp->options[opt_idx++] = 53;
+    dhcp->options[opt_idx++] = 1;
+    dhcp->options[opt_idx++] = 1;
 
-    packet.options[opt_idx++] = 55;
-    packet.options[opt_idx++] = 3;
-    packet.options[opt_idx++] = 1;
-    packet.options[opt_idx++] = 3;
-    packet.options[opt_idx++] = 6;
-    packet.options[opt_idx++] = 255;
+    dhcp->options[opt_idx++] = 55;
+    dhcp->options[opt_idx++] = 3;
+    dhcp->options[opt_idx++] = 1;
+    dhcp->options[opt_idx++] = 3;
+    dhcp->options[opt_idx++] = 6;
+    dhcp->options[opt_idx++] = 255;
 
-    struct sockaddr_in dest_addr;
-    memset(&dest_addr, 0, sizeof(dest_addr));
-    dest_addr.sin_family = AF_INET;
-    dest_addr.sin_port = htons(67);
-    dest_addr.sin_addr.s_addr = INADDR_BROADCAST;
+    size_t dhcp_len = sizeof(struct dhcp_msg);
+    size_t udp_len = sizeof(struct udphdr) + dhcp_len;
+    size_t ip_len = sizeof(struct iphdr) + udp_len;
 
-    if (sendto(sock, &packet, sizeof(packet), 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) < 0) {
+    udph->source = htons(68);
+    udph->dest = htons(67);
+    udph->len = htons(udp_len);
+    udph->check = 0;
+
+    iph->version = 4;
+    iph->ihl = 5;
+    iph->tos = 0;
+    iph->tot_len = htons(ip_len);
+    iph->id = htons(rand() % 65535);
+    iph->frag_off = 0;
+    iph->ttl = 64;
+    iph->protocol = IPPROTO_UDP;
+    iph->saddr = 0;
+    iph->daddr = INADDR_BROADCAST;
+    iph->check = dhcp_checksum((uint16_t *)iph, sizeof(struct iphdr) / 2);
+
+    if (sendto(sock, buffer, ip_len, 0, (struct sockaddr *)&sll, sizeof(sll)) < 0) {
         close(sock);
         return -1;
     }
 
-    struct dhcp_msg recv_packet;
-    ssize_t n = recv(sock, &recv_packet, sizeof(recv_packet), 0);
-    if (n < 240 || recv_packet.xid != xid) {
-        close(sock);
-        return -1;
-    }
+    uint8_t recv_buf[1024];
+    uint32_t offered_ip = 0, subnet_mask = 0, gateway_ip = 0, dns_ip = 0;
+    int offer_received = 0;
 
-    uint32_t offered_ip = recv_packet.yiaddr;
-    uint32_t subnet_mask = 0;
-    uint32_t gateway_ip = 0;
-    uint32_t dns_ip = 0;
+    for (int retry = 0; retry < 5; retry++) {
+        ssize_t n = recvfrom(sock, recv_buf, sizeof(recv_buf), 0, NULL, NULL);
+        if (n < (ssize_t)(sizeof(struct iphdr) + sizeof(struct udphdr) + 240)) continue;
 
-    int i = 0;
-    while (i < 300 && recv_packet.options[i] != 255) {
-        uint8_t tag = recv_packet.options[i++];
-        if (tag == 0) continue;
-        uint8_t len = recv_packet.options[i++];
-        if (tag == 1 && len >= 4) {
-            memcpy(&subnet_mask, &recv_packet.options[i], 4);
-        } else if (tag == 3 && len >= 4) {
-            memcpy(&gateway_ip, &recv_packet.options[i], 4);
-        } else if (tag == 6 && len >= 4) {
-            memcpy(&dns_ip, &recv_packet.options[i], 4);
+        struct iphdr *riph = (struct iphdr *)recv_buf;
+        if (riph->protocol != IPPROTO_UDP) continue;
+
+        int ip_hdr_len = riph->ihl * 4;
+        struct udphdr *rudph = (struct udphdr *)(recv_buf + ip_hdr_len);
+        if (ntohs(rudph->dest) != 68) continue;
+
+        struct dhcp_msg *rdhcp = (struct dhcp_msg *)(recv_buf + ip_hdr_len + sizeof(struct udphdr));
+        if (rdhcp->xid == xid && rdhcp->op == 2) {
+            offered_ip = rdhcp->yiaddr;
+            int i = 0;
+            while (i < 300 && rdhcp->options[i] != 255) {
+                uint8_t tag = rdhcp->options[i++];
+                if (tag == 0) continue;
+                uint8_t len = rdhcp->options[i++];
+                if (tag == 1 && len >= 4) memcpy(&subnet_mask, &rdhcp->options[i], 4);
+                else if (tag == 3 && len >= 4) memcpy(&gateway_ip, &rdhcp->options[i], 4);
+                else if (tag == 6 && len >= 4) memcpy(&dns_ip, &rdhcp->options[i], 4);
+                i += len;
+            }
+            offer_received = 1;
+            break;
         }
-        i += len;
     }
 
-    memset(&packet, 0, sizeof(packet));
-    packet.op = 1;
-    packet.htype = 1;
-    packet.hlen = 6;
-    packet.xid = xid;
-    packet.flags = htons(0x8000);
-    memcpy(packet.chaddr, ifr.ifr_hwaddr.sa_data, 6);
-    packet.cookie = htonl(0x63825363);
+    if (!offer_received || offered_ip == 0) {
+        close(sock);
+        return -1;
+    }
+
+    memset(buffer, 0, sizeof(buffer));
+    iph = (struct iphdr *)buffer;
+    udph = (struct udphdr *)(buffer + sizeof(struct iphdr));
+    dhcp = (struct dhcp_msg *)(buffer + sizeof(struct iphdr) + sizeof(struct udphdr));
+
+    dhcp->op = 1;
+    dhcp->htype = 1;
+    dhcp->hlen = 6;
+    dhcp->xid = xid;
+    dhcp->flags = htons(0x8000);
+    memcpy(dhcp->chaddr, ifr.ifr_hwaddr.sa_data, 6);
+    dhcp->cookie = htonl(0x63825363);
 
     opt_idx = 0;
-    packet.options[opt_idx++] = 53;
-    packet.options[opt_idx++] = 1;
-    packet.options[opt_idx++] = 3;
+    dhcp->options[opt_idx++] = 53;
+    dhcp->options[opt_idx++] = 1;
+    dhcp->options[opt_idx++] = 3;
 
-    packet.options[opt_idx++] = 50;
-    packet.options[opt_idx++] = 4;
-    memcpy(&packet.options[opt_idx], &offered_ip, 4);
+    dhcp->options[opt_idx++] = 50;
+    dhcp->options[opt_idx++] = 4;
+    memcpy(&dhcp->options[opt_idx], &offered_ip, 4);
     opt_idx += 4;
 
-    packet.options[opt_idx++] = 255;
+    dhcp->options[opt_idx++] = 255;
 
-    sendto(sock, &packet, sizeof(packet), 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
-    recv(sock, &recv_packet, sizeof(recv_packet), 0);
+    udph->source = htons(68);
+    udph->dest = htons(67);
+    udph->len = htons(udp_len);
+    udph->check = 0;
+
+    iph->version = 4;
+    iph->ihl = 5;
+    iph->tos = 0;
+    iph->tot_len = htons(ip_len);
+    iph->id = htons(rand() % 65535);
+    iph->frag_off = 0;
+    iph->ttl = 64;
+    iph->protocol = IPPROTO_UDP;
+    iph->saddr = 0;
+    iph->daddr = INADDR_BROADCAST;
+    iph->check = dhcp_checksum((uint16_t *)iph, sizeof(struct iphdr) / 2);
+
+    sendto(sock, buffer, ip_len, 0, (struct sockaddr *)&sll, sizeof(sll));
+    recvfrom(sock, recv_buf, sizeof(recv_buf), 0, NULL, NULL);
     close(sock);
 
     char ip_str[INET_ADDRSTRLEN], gw_str[INET_ADDRSTRLEN], dns_str[INET_ADDRSTRLEN];
