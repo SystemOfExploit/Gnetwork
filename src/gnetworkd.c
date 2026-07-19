@@ -81,8 +81,8 @@ static int builtin_dhcp(const char *ifname) {
     if (sock < 0) return -1;
 
     struct timeval tv;
-    tv.tv_sec = 3;
-    tv.tv_usec = 0;
+    tv.tv_sec = 0;
+    tv.tv_usec = 300000;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     int ctl_sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -291,12 +291,12 @@ static void auto_dhcp(const char *ifname) {
     snprintf(cmd, sizeof(cmd), "ip link set %.32s up 2>/dev/null", ifname);
     system(cmd);
 
-    snprintf(cmd, sizeof(cmd), "dhcpcd %.32s 2>/dev/null || udhcpc -i %.32s -n 2>/dev/null || dhclient %.32s 2>/dev/null || busybox udhcpc -i %.32s -n 2>/dev/null", ifname, ifname, ifname, ifname);
-    int res = system(cmd);
-
-    if (res != 0) {
-        builtin_dhcp(ifname);
+    if (builtin_dhcp(ifname) == 0) {
+        return;
     }
+
+    snprintf(cmd, sizeof(cmd), "dhcpcd %.32s 2>/dev/null || udhcpc -i %.32s -n 2>/dev/null || dhclient %.32s 2>/dev/null || busybox udhcpc -i %.32s -n 2>/dev/null", ifname, ifname, ifname, ifname);
+    system(cmd);
 }
 
 static void handle_status(struct msg_res *res) {
