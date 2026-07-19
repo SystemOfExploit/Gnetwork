@@ -396,10 +396,31 @@ static void handle_set_static(const struct msg_req *req, struct msg_res *res) {
 }
 
 static void handle_if_control(const char *ifname, int up, struct msg_res *res) {
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "ip link set %s %s", ifname, up ? "up" : "down");
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "ip link set %.32s %s", ifname, up ? "up" : "down");
     int ret = system(cmd);
     if (ret == 0) {
+        if (up) {
+            char ip_buf[64] = {0};
+            snprintf(cmd, sizeof(cmd), "ip -4 addr show dev %.32s | grep -oP 'inet \\K[0-9.]+' | head -n1", ifname);
+            execute_command(cmd, ip_buf, sizeof(ip_buf));
+            char *nl = strchr(ip_buf, '\n');
+            if (nl) *nl = '\0';
+
+            if (strlen(ip_buf) > 0) {
+                struct in_addr addr;
+                if (inet_pton(AF_INET, ip_buf, &addr) == 1) {
+                    uint32_t ip_num = addr.s_addr;
+                    uint32_t gw_num = (ip_num & htonl(0xFFFFFF00)) | htonl(2);
+                    char gw_str[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &gw_num, gw_str, sizeof(gw_str));
+                    snprintf(cmd, sizeof(cmd), "ip route add default via %s dev %.32s 2>/dev/null", gw_str, ifname);
+                    system(cmd);
+                }
+            } else {
+                auto_dhcp(ifname);
+            }
+        }
         snprintf(res->output, sizeof(res->output), "Interface %s turned %s\n", ifname, up ? "UP" : "DOWN");
         res->status = 0;
     } else {
@@ -448,7 +469,6 @@ static void process_client(int client_fd) {
             break;
         case CMD_IF_UP:
             handle_if_control(req.ifname, 1, &res);
-            auto_dhcp(req.ifname);
             break;
         case CMD_IF_DOWN:
             handle_if_control(req.ifname, 0, &res);
