@@ -38,18 +38,197 @@ static void update_resolv_conf(const char *dns1, const char *dns2) {
     fclose(fp);
 }
 
+#include <sys/ioctl.h>
+
+struct dhcp_msg {
+    uint8_t op;
+    uint8_t htype;
+    uint8_t hlen;
+    uint8_t hops;
+    uint32_t xid;
+    uint16_t secs;
+    uint16_t flags;
+    uint32_t ciaddr;
+    uint32_t yiaddr;
+    uint32_t siaddr;
+    uint32_t giaddr;
+    uint8_t chaddr[16];
+    uint8_t sname[64];
+    uint8_t file[128];
+    uint32_t cookie;
+    uint8_t options[308];
+} __attribute__((packed));
+
+static int builtin_dhcp(const char *ifname) {
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) return -1;
+
+    int opt = 1;
+    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
+    setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE, ifname, strlen(ifname));
+
+    struct timeval tv;
+    tv.tv_sec = 2;
+    tv.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+    if (ioctl(sock, SIOCGIFHWADDR, &ifr) < 0) {
+        close(sock);
+        return -1;
+    }
+
+    struct sockaddr_in bind_addr;
+    memset(&bind_addr, 0, sizeof(bind_addr));
+    bind_addr.sin_family = AF_INET;
+    bind_addr.sin_port = htons(68);
+    bind_addr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
+        close(sock);
+        return -1;
+    }
+
+    uint32_t xid = (uint32_t)rand();
+
+    struct dhcp_msg packet;
+    memset(&packet, 0, sizeof(packet));
+    packet.op = 1;
+    packet.htype = 1;
+    packet.hlen = 6;
+    packet.xid = xid;
+    packet.flags = htons(0x8000);
+    memcpy(packet.chaddr, ifr.ifr_hwaddr.sa_data, 6);
+    packet.cookie = htonl(0x63825363);
+
+    int opt_idx = 0;
+    packet.options[opt_idx++] = 53;
+    packet.options[opt_idx++] = 1;
+    packet.options[opt_idx++] = 1;
+
+    packet.options[opt_idx++] = 55;
+    packet.options[opt_idx++] = 3;
+    packet.options[opt_idx++] = 1;
+    packet.options[opt_idx++] = 3;
+    packet.options[opt_idx++] = 6;
+    packet.options[opt_idx++] = 255;
+
+    struct sockaddr_in dest_addr;
+    memset(&dest_addr, 0, sizeof(dest_addr));
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(67);
+    dest_addr.sin_addr.s_addr = INADDR_BROADCAST;
+
+    if (sendto(sock, &packet, sizeof(packet), 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) < 0) {
+        close(sock);
+        return -1;
+    }
+
+    struct dhcp_msg recv_packet;
+    ssize_t n = recv(sock, &recv_packet, sizeof(recv_packet), 0);
+    if (n < 240 || recv_packet.xid != xid) {
+        close(sock);
+        return -1;
+    }
+
+    uint32_t offered_ip = recv_packet.yiaddr;
+    uint32_t subnet_mask = 0;
+    uint32_t gateway_ip = 0;
+    uint32_t dns_ip = 0;
+
+    int i = 0;
+    while (i < 300 && recv_packet.options[i] != 255) {
+        uint8_t tag = recv_packet.options[i++];
+        if (tag == 0) continue;
+        uint8_t len = recv_packet.options[i++];
+        if (tag == 1 && len >= 4) {
+            memcpy(&subnet_mask, &recv_packet.options[i], 4);
+        } else if (tag == 3 && len >= 4) {
+            memcpy(&gateway_ip, &recv_packet.options[i], 4);
+        } else if (tag == 6 && len >= 4) {
+            memcpy(&dns_ip, &recv_packet.options[i], 4);
+        }
+        i += len;
+    }
+
+    memset(&packet, 0, sizeof(packet));
+    packet.op = 1;
+    packet.htype = 1;
+    packet.hlen = 6;
+    packet.xid = xid;
+    packet.flags = htons(0x8000);
+    memcpy(packet.chaddr, ifr.ifr_hwaddr.sa_data, 6);
+    packet.cookie = htonl(0x63825363);
+
+    opt_idx = 0;
+    packet.options[opt_idx++] = 53;
+    packet.options[opt_idx++] = 1;
+    packet.options[opt_idx++] = 3;
+
+    packet.options[opt_idx++] = 50;
+    packet.options[opt_idx++] = 4;
+    memcpy(&packet.options[opt_idx], &offered_ip, 4);
+    opt_idx += 4;
+
+    packet.options[opt_idx++] = 255;
+
+    sendto(sock, &packet, sizeof(packet), 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+    recv(sock, &recv_packet, sizeof(recv_packet), 0);
+    close(sock);
+
+    char ip_str[INET_ADDRSTRLEN], gw_str[INET_ADDRSTRLEN], dns_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &offered_ip, ip_str, sizeof(ip_str));
+
+    int cidr = 24;
+    if (subnet_mask != 0) {
+        uint32_t mask = ntohl(subnet_mask);
+        cidr = 0;
+        while (mask) { if (mask & 1) cidr++; mask >>= 1; }
+    }
+
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "ip addr flush dev %.32s 2>/dev/null", ifname);
+    system(cmd);
+    snprintf(cmd, sizeof(cmd), "ip addr add %s/%d dev %.32s 2>/dev/null", ip_str, cidr, ifname);
+    system(cmd);
+    snprintf(cmd, sizeof(cmd), "ip link set %.32s up 2>/dev/null", ifname);
+    system(cmd);
+
+    if (gateway_ip != 0) {
+        inet_ntop(AF_INET, &gateway_ip, gw_str, sizeof(gw_str));
+        snprintf(cmd, sizeof(cmd), "ip route add default via %s dev %.32s 2>/dev/null", gw_str, ifname);
+        system(cmd);
+    }
+
+    if (dns_ip != 0) {
+        inet_ntop(AF_INET, &dns_ip, dns_str, sizeof(dns_str));
+        update_resolv_conf(dns_str, "8.8.8.8");
+    } else {
+        update_resolv_conf("1.1.1.1", "8.8.8.8");
+    }
+
+    return 0;
+}
+
 static void auto_dhcp(const char *ifname) {
     char cmd[512];
     snprintf(cmd, sizeof(cmd), "ip link set %.32s up 2>/dev/null", ifname);
     system(cmd);
-    snprintf(cmd, sizeof(cmd), "dhcpcd %.32s 2>/dev/null || udhcpc -i %.32s -n 2>/dev/null || dhclient %.32s 2>/dev/null", ifname, ifname, ifname);
-    system(cmd);
+
+    snprintf(cmd, sizeof(cmd), "dhcpcd %.32s 2>/dev/null || udhcpc -i %.32s -n 2>/dev/null || dhclient %.32s 2>/dev/null || busybox udhcpc -i %.32s -n 2>/dev/null", ifname, ifname, ifname, ifname);
+    int res = system(cmd);
+
+    if (res != 0) {
+        builtin_dhcp(ifname);
+    }
 }
 
 static void handle_status(struct msg_res *res) {
     char buffer[3500];
     buffer[0] = '\0';
-    execute_command("ip -4 addr show", buffer, sizeof(buffer));
+    execute_command("ip addr show", buffer, sizeof(buffer));
     snprintf(res->output, sizeof(res->output), "=== Gnetwork Active Interfaces ===\n%s", buffer);
     res->status = 0;
 }
@@ -215,7 +394,7 @@ static void auto_detect_and_bringup() {
     struct dirent *ent;
     while ((ent = readdir(dir)) != NULL) {
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0 || strcmp(ent->d_name, "lo") == 0) continue;
-        if (strncmp(ent->d_name, "eth", 3) == 0 || strncmp(ent->d_name, "en", 2) == 0) {
+        if (strncmp(ent->d_name, "eth", 3) == 0 || strncmp(ent->d_name, "en", 2) == 0 || strncmp(ent->d_name, "wl", 2) == 0) {
             auto_dhcp(ent->d_name);
         }
     }
