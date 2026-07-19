@@ -1,0 +1,9 @@
+[main]
+@type = classic
+@version = 0.0.1
+@description = "Gnetwork Management Daemon"
+@user = ( root )
+
+[start]
+@build = custom
+@execute = ( /usr/local/bin/gnetworkd )

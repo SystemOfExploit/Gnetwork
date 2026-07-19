@@ -1,0 +1,12 @@
+#!/sbin/openrc-run
+
+name="gnetwork"
+description="Gnetwork Management Daemon"
+command="/usr/local/bin/gnetworkd"
+command_background="yes"
+pidfile="/run/gnetworkd.pid"
+
+depend() {
+    need localmount
+    provide net
+}

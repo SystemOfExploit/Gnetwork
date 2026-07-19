@@ -1,0 +1,4 @@
+name=Gnetwork
+command=/usr/local/bin/gnetworkd
+type=daemon
+restart=true

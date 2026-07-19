@@ -1,0 +1,4 @@
+type = process
+command = /usr/local/bin/gnetworkd
+restart = true
+smooth-recovery = true
