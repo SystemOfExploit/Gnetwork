@@ -70,7 +70,7 @@ int main(int argc, char *argv[]) {
     } else if (strcmp(cmd, "disconnect") == 0) {
         req.cmd = CMD_DISCONNECT;
         if (argc >= 3) strncpy(req.ifname, argv[2], sizeof(req.ifname) - 1);
-    } else if (strcmp(cmd, "set-ip") == 0) {
+    } else if (strcmp(cmd, "set-ip") == 0 || strcmp(cmd, "ip") == 0) {
         if (argc < 4) {
             fprintf(stderr, "Usage: %s set-ip <interface> <ip/prefix> [gateway]\n", argv[0]);
             return 1;
@@ -87,14 +87,14 @@ int main(int argc, char *argv[]) {
             strcpy(req.netmask, "24");
         }
         if (argc >= 5) strncpy(req.gateway, argv[4], sizeof(req.gateway) - 1);
-    } else if (strcmp(cmd, "set-dhcp") == 0) {
+    } else if (strcmp(cmd, "set-dhcp") == 0 || strcmp(cmd, "dhcp") == 0) {
         if (argc < 3) {
             fprintf(stderr, "Usage: %s set-dhcp <interface>\n", argv[0]);
             return 1;
         }
         req.cmd = CMD_SET_DHCP;
         strncpy(req.ifname, argv[2], sizeof(req.ifname) - 1);
-    } else if (strcmp(cmd, "set-dns") == 0) {
+    } else if (strcmp(cmd, "set-dns") == 0 || strcmp(cmd, "dns") == 0) {
         if (argc < 3) {
             fprintf(stderr, "Usage: %s set-dns <primary_dns> [secondary_dns]\n", argv[0]);
             return 1;

@@ -166,7 +166,8 @@ static int builtin_dhcp(const char *ifname) {
     uint32_t offered_ip = 0, subnet_mask = 0, gateway_ip = 0, dns_ip = 0;
     int offer_received = 0;
 
-    for (int retry = 0; retry < 5; retry++) {
+    for (int retry = 0; retry < 3; retry++) {
+        sendto(sock, buffer, ip_len, 0, (struct sockaddr *)&sll, sizeof(sll));
         ssize_t n = recvfrom(sock, recv_buf, sizeof(recv_buf), 0, NULL, NULL);
         if (n < (ssize_t)(sizeof(struct iphdr) + sizeof(struct udphdr) + 240)) continue;
 
@@ -263,6 +264,11 @@ static int builtin_dhcp(const char *ifname) {
     system(cmd);
     snprintf(cmd, sizeof(cmd), "ip link set %.32s up 2>/dev/null", ifname);
     system(cmd);
+
+    if (gateway_ip == 0 && offered_ip != 0) {
+        uint32_t net = offered_ip & (subnet_mask ? subnet_mask : htonl(0xFFFFFF00));
+        gateway_ip = net | htonl(2);
+    }
 
     if (gateway_ip != 0) {
         inet_ntop(AF_INET, &gateway_ip, gw_str, sizeof(gw_str));
@@ -442,6 +448,7 @@ static void process_client(int client_fd) {
             break;
         case CMD_IF_UP:
             handle_if_control(req.ifname, 1, &res);
+            auto_dhcp(req.ifname);
             break;
         case CMD_IF_DOWN:
             handle_if_control(req.ifname, 0, &res);
